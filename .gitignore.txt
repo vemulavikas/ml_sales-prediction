@@ -1,0 +1,18 @@
+# Node
+frontend\node_modules\
+
+# Python
+backend\__pycache__\
+backend\*.pyc
+venv\
+.venv\
+
+# ML models
+model_dir\
+
+# Env files
+.env
+
+# OS
+Thumbs.db
+.DS_Store
