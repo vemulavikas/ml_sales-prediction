@@ -17,6 +17,26 @@ DATASET_PATH = os.path.join(
 )
 
 
+@app.route("/", methods=["GET"])
+def home():
+    return jsonify(
+        {
+            "status": "ok",
+            "message": "ML Sales Prediction API is running",
+            "endpoints": {
+                "actual": "/actual",
+                "analysis": "/analysis",
+                "forecast": "/forecast?months=12",
+            },
+        }
+    )
+
+
+@app.route("/health", methods=["GET"])
+def health():
+    return jsonify({"status": "ok"})
+
+
 # ---------- ACTUAL SALES (FROM POSTGRESQL) ----------
 @app.route("/actual", methods=["GET"])
 def actual_sales():
