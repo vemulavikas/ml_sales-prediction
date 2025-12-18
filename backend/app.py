@@ -156,11 +156,39 @@ def forecast():
     months = request.args.get("months", 12, type=int)
     forecast_type = "1year" if months == 12 else "2year"
 
-    result = run_prediction(
-        model_dir=MODEL_DIR,
-        history_path=DATASET_PATH,
-        predict_months=months
+    # ------------------------------------------------------------------
+    # Render stability: TensorFlow inference can crash the worker on small
+    # instances. If we're on Render (or explicitly configured), serve
+    # precomputed forecasts generated from the same trained model.
+    # ------------------------------------------------------------------
+    forecast_mode = os.environ.get("FORECAST_MODE", "auto").lower()
+    on_render = bool(
+        os.environ.get("RENDER")
+        or os.environ.get("RENDER_SERVICE_ID")
+        or os.environ.get("RENDER_EXTERNAL_URL")
     )
+
+    if forecast_mode == "precomputed" or (forecast_mode == "auto" and on_render):
+        precomputed_path = os.path.join(
+            os.path.dirname(__file__),
+            "precomputed",
+            f"forecast_{months}.json",
+        )
+        try:
+            import json
+
+            with open(precomputed_path, "r", encoding="utf-8") as f:
+                result = json.load(f)
+            result["precomputed"] = True
+        except Exception as exc:
+            return jsonify({"error": f"Precomputed forecast unavailable: {exc}"}), 500
+    else:
+        # Local/dev: run live inference.
+        result = run_prediction(
+            model_dir=MODEL_DIR,
+            history_path=DATASET_PATH,
+            predict_months=months,
+        )
 
     # Best-effort persistence (not required for assignment).
     try:
