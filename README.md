@@ -97,6 +97,14 @@ After deploy:
 
 The ML training scripts live in `ml_training/`.
 
+### Model Metrics
+
+From `models/metadata.json` (latest exported training run):
+
+- Validation MAE: 50.53
+- Validation RMSE: 58.22
+- Validation MAPE: 0.72%
+
 Train:
 
 ```bash
