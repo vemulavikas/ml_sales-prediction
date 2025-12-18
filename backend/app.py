@@ -8,8 +8,6 @@ except Exception:  # pragma: no cover
 
 import pandas as pd
 
-from predict_lstm import run_prediction
-
 app = Flask(__name__)
 if CORS is not None:
     CORS(app)
@@ -162,18 +160,20 @@ def forecast():
     # precomputed forecasts generated from the same trained model.
     # ------------------------------------------------------------------
     forecast_mode = os.environ.get("FORECAST_MODE", "auto").lower()
-    on_render = bool(
-        os.environ.get("RENDER")
-        or os.environ.get("RENDER_SERVICE_ID")
-        or os.environ.get("RENDER_EXTERNAL_URL")
+    precomputed_path = os.path.join(
+        os.path.dirname(__file__),
+        "precomputed",
+        f"forecast_{months}.json",
     )
 
-    if forecast_mode == "precomputed" or (forecast_mode == "auto" and on_render):
-        precomputed_path = os.path.join(
-            os.path.dirname(__file__),
-            "precomputed",
-            f"forecast_{months}.json",
-        )
+    # Default behavior: if we have a precomputed forecast file for the
+    # requested horizon, serve it. This avoids TF inference crashes on small
+    # deploy instances and makes the demo deterministic.
+    use_precomputed = forecast_mode in {"auto", "precomputed"} and os.path.isfile(
+        precomputed_path
+    )
+
+    if use_precomputed:
         try:
             import json
 
@@ -181,9 +181,12 @@ def forecast():
                 result = json.load(f)
             result["precomputed"] = True
         except Exception as exc:
-            return jsonify({"error": f"Precomputed forecast unavailable: {exc}"}), 500
+            return jsonify({"error": f"Precomputed forecast read failed: {exc}"}), 500
     else:
-        # Local/dev: run live inference.
+        # Live inference path (opt-in via FORECAST_MODE=live or when no
+        # precomputed file exists).
+        from predict_lstm import run_prediction
+
         result = run_prediction(
             model_dir=MODEL_DIR,
             history_path=DATASET_PATH,
