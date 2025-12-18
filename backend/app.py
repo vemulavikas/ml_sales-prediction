@@ -83,7 +83,38 @@ def home():
 
 @app.route("/health", methods=["GET"])
 def health():
-    return jsonify({"status": "ok"})
+    versions = {"python": None, "tensorflow": None, "numpy": None, "pandas": None}
+    try:
+        import sys
+
+        versions["python"] = sys.version.split()[0]
+    except Exception:
+        pass
+    try:
+        import tensorflow as tf
+
+        versions["tensorflow"] = getattr(tf, "__version__", None)
+    except Exception:
+        pass
+    try:
+        import numpy as np
+
+        versions["numpy"] = getattr(np, "__version__", None)
+    except Exception:
+        pass
+    try:
+        versions["pandas"] = getattr(pd, "__version__", None)
+    except Exception:
+        pass
+
+    return jsonify(
+        {
+            "status": "ok",
+            "versions": versions,
+            "model_dir_exists": os.path.isdir(MODEL_DIR),
+            "dataset_exists": os.path.isfile(DATASET_PATH),
+        }
+    )
 
 
 # ---------- ACTUAL SALES (FROM DATASET) ----------

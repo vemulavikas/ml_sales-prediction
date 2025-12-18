@@ -4,8 +4,8 @@ services:
     env: python
     plan: free
     rootDir: backend
-    buildCommand: pip install --upgrade pip setuptools wheel && pip install --upgrade --force-reinstall --no-cache-dir -r requirements.txt && python -c "import sklearn; print('scikit-learn', sklearn.__version__)"
-    startCommand: gunicorn app:app --bind 0.0.0.0:$PORT --timeout 120
+    buildCommand: pip install --upgrade pip setuptools wheel && pip install --upgrade --force-reinstall --no-cache-dir -r requirements.txt && python -c "import sys; print('python', sys.version.split()[0]); import tensorflow as tf; print('tensorflow', tf.__version__); import numpy as np; print('numpy', np.__version__); import pandas as pd; print('pandas', pd.__version__)"
+    startCommand: gunicorn app:app --bind 0.0.0.0:$PORT --timeout 180 --workers 1 --threads 1
     envVars:
       - key: PYTHON_VERSION
         value: 3.11.7

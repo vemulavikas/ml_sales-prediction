@@ -5,7 +5,6 @@ from datetime import datetime, timezone
 
 import numpy as np
 import pandas as pd
-from sklearn.preprocessing import MinMaxScaler
 import tensorflow as tf
 
 
@@ -162,26 +161,62 @@ def load_sales_file(path: str) -> pd.DataFrame:
 	return _load_weekly_wide_sales(df)
 
 
-def _inverse_first_feature(scaled_col: np.ndarray, scaler: MinMaxScaler) -> np.ndarray:
-	"""Inverse-transform the first feature using a multi-feature scaler."""
-	if scaled_col.ndim == 1:
-		scaled_col = scaled_col.reshape(-1, 1)
+def _fit_minmax_scaler(values_train: np.ndarray, feature_range=(0.0, 1.0)) -> dict:
+	"""Fit MinMax scaling params (sklearn-compatible) without sklearn.
 
-	n_samples = scaled_col.shape[0]
-	n_features = getattr(scaler, "n_features_in_", 1)
+	We store parameters in a dict so we never need to unpickle a scaler.
+	This avoids deployment failures caused by scikit-learn version mismatch.
+	"""
+	if values_train.ndim != 2:
+		raise ValueError("values_train must have shape (n_samples, n_features)")
+	min_range, max_range = map(float, feature_range)
+	data_min = np.nanmin(values_train, axis=0).astype("float32")
+	data_max = np.nanmax(values_train, axis=0).astype("float32")
+	data_range = data_max - data_min
 
-	if n_features == 1:
-		return scaler.inverse_transform(scaled_col).reshape(-1)
+	# Avoid divide-by-zero if a feature is constant
+	safe_range = np.where(data_range == 0.0, 1.0, data_range).astype("float32")
+	scale = ((max_range - min_range) / safe_range).astype("float32")
+	min_ = (min_range - data_min * scale).astype("float32")
 
-	zeros = np.zeros((n_samples, n_features - 1), dtype="float32")
-	full_scaled = np.concatenate([scaled_col.astype("float32"), zeros], axis=1)
-	inv_full = scaler.inverse_transform(full_scaled)
-	return inv_full[:, 0]
+	return {
+		"feature_range": (min_range, max_range),
+		"data_min": data_min,
+		"data_max": data_max,
+		"scale": scale,
+		"min": min_,
+		"n_features": int(values_train.shape[1]),
+	}
+
+
+def _minmax_transform(values: np.ndarray, scaler_params: dict) -> np.ndarray:
+	if values.ndim != 2:
+		raise ValueError("values must have shape (n_samples, n_features)")
+	scale = np.asarray(scaler_params["scale"], dtype="float32")
+	min_ = np.asarray(scaler_params["min"], dtype="float32")
+	return (values.astype("float32") * scale) + min_
+
+
+def _minmax_inverse_first_feature(scaled_first: np.ndarray, scaler_params: dict) -> np.ndarray:
+	"""Inverse-transform the first feature only.
+
+	MinMaxScaler transforms each feature independently, so we can invert the
+	first feature directly without needing dummy values for other features.
+	"""
+	if scaled_first.ndim == 1:
+		scaled_first = scaled_first.reshape(-1, 1)
+
+	scale0 = float(np.asarray(scaler_params["scale"], dtype="float32")[0])
+	min0 = float(np.asarray(scaler_params["min"], dtype="float32")[0])
+
+	# If a feature was constant, we set safe_range=1.0, so scale0 is finite.
+	inv = (scaled_first.astype("float32") - min0) / (scale0 if scale0 != 0.0 else 1.0)
+	return inv.reshape(-1)
 
 
 def iterative_forecast(
 	model,
-	scaler: MinMaxScaler,
+	scaler_params: dict,
 	history_df: pd.DataFrame,
 	lookback: int,
 	predict_months: int,
@@ -201,7 +236,7 @@ def iterative_forecast(
 		raise ValueError("Not enough history to run iterative forecast")
 
 	values = history_df.values.astype("float32")
-	scaled_history = scaler.transform(values).astype("float32")
+	scaled_history = _minmax_transform(values, scaler_params).astype("float32")
 	n_features = scaled_history.shape[1]
 
 	history_list = scaled_history.tolist()
@@ -220,7 +255,7 @@ def iterative_forecast(
 		history_list.append(new_vec)
 
 	scaled_arr = np.array(scaled_predictions, dtype="float32").reshape(-1, 1)
-	forecasts = _inverse_first_feature(scaled_arr, scaler)
+	forecasts = _minmax_inverse_first_feature(scaled_arr, scaler_params)
 
 	# Base monthly index; may be remapped depending on date_mode
 	last_date = history_df.index[-1]
@@ -263,23 +298,6 @@ def _map_output_dates(
 	return pd.DatetimeIndex(months)
 
 
-def load_scaler(model_dir: str) -> MinMaxScaler:
-	scaler_path = os.path.join(model_dir, "scaler.pkl")
-	if not os.path.isfile(scaler_path):
-		raise FileNotFoundError(f"Scaler not found at {scaler_path}")
-
-	try:
-		import joblib
-
-		scaler = joblib.load(scaler_path)
-	except Exception:  # pragma: no cover - serialization specifics
-		import pickle
-
-		with open(scaler_path, "rb") as f:
-			scaler = pickle.load(f)
-	return scaler
-
-
 def load_metadata(model_dir: str) -> dict:
 	metadata_path = os.path.join(model_dir, "metadata.json")
 	if not os.path.isfile(metadata_path):
@@ -303,13 +321,24 @@ def run_prediction(
 		raise FileNotFoundError(f"SavedModel directory not found: {saved_model_dir}")
 
 	model = _load_saved_model_for_inference(saved_model_dir)
-	scaler = load_scaler(model_dir)
 
 	history_df = load_sales_file(history_path)
 
+	# Fit scaling params exactly like training: fit on training portion only
+	# and reserve the last 12 steps for validation.
+	values = history_df.values.astype("float32")
+	n_total = values.shape[0]
+	n_val_steps = 12
+	if n_total < lookback + n_val_steps:
+		raise ValueError(
+			"Time series is too short. Need at least lookback + 12 steps of data."
+		)
+	n_train = n_total - n_val_steps
+	scaler_params = _fit_minmax_scaler(values[:n_train])
+
 	future_dates_raw, forecasts = iterative_forecast(
 		model=model,
-		scaler=scaler,
+		scaler_params=scaler_params,
 		history_df=history_df,
 		lookback=lookback,
 		predict_months=predict_months,
@@ -337,56 +366,6 @@ def run_prediction(
 			json.dump(result, f, indent=2)
 
 	return result
-
-
-def forecast_to_dataframe(
-	model_dir: str,
-	history_path: str,
-	predict_months: int,
-) -> pd.DataFrame:
-	"""Return a DataFrame with mapped forecast dates and values."""
-	metadata = load_metadata(model_dir)
-	lookback = int(metadata.get("lookback", 12))
-
-	saved_model_dir = os.path.join(model_dir, "lstm_saved_model")
-	if not os.path.isdir(saved_model_dir):
-		raise FileNotFoundError(f"SavedModel directory not found: {saved_model_dir}")
-
-	layer = TFSMLayer(saved_model_dir, call_endpoint="serving_default")
-
-	class _WrappedModel:
-		def __init__(self, layer):
-			self.layer = layer
-
-		def predict(self, x, verbose=0):  # noqa: ARG002 - verbose kept for API compat
-			outputs = self.layer(x)
-			if isinstance(outputs, dict):
-				outputs = next(iter(outputs.values()))
-			return outputs.numpy()
-
-	model = _WrappedModel(layer)
-	scaler = load_scaler(model_dir)
-
-	history_df = load_sales_file(history_path)
-
-	future_dates_raw, forecasts = iterative_forecast(
-		model=model,
-		scaler=scaler,
-		history_df=history_df,
-		lookback=lookback,
-		predict_months=predict_months,
-	)
-
-	mapped_dates = _map_output_dates(
-		future_dates=future_dates_raw,
-		predict_months=predict_months,
-		metadata=metadata,
-		history_df=history_df,
-	)
-
-	df = pd.DataFrame({"date": mapped_dates, "forecast": forecasts})
-	df["date"] = pd.to_datetime(df["date"])  # ensure datetime dtype
-	return df
 
 
 def parse_args():
